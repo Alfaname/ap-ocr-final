@@ -1,30 +1,5 @@
-import { cleanName, jaccard } from "./text-normalize";
-export interface ProductMaster { id: string; sku: string; name: string; uom?: string; gramasi?: number; price_ref?: number; aliases?: string[]; }
-export interface ProdCandidate { id: string; sku: string; name: string; uom?: string; gramasi?: number; price_ref?: number; score: number; reason: string; }
-export const AUTO_THRESHOLD = 0.9;
-
-// ukuran/kemasan wajib dibedakan (SANTAN 200 ML != SANTAN 1 L).
-const SIZE = /(\d+(?:[.,]\d+)?)\s?(ML|L|GR|G|KG|PCS|PACK|BTL|BKS|IKAT|BIJI|KMPT|CC)\b/gi;
-function sizeSet(s: string): string {
-  return (cleanName(s).match(SIZE) ?? []).map((x) => x.replace(/\s+/g, "")).sort().join("|");
-}
-export function matchProduct(raw: string, masters: ProductMaster[]): { auto: ProdCandidate | null; candidates: ProdCandidate[]; needsReview: boolean } {
-  const rc = cleanName(raw), rsize = sizeSet(raw);
-  const cands: ProdCandidate[] = [];
-  for (const m of masters) {
-    let score = 0, reason = "";
-    if (cleanName(m.name) === rc) { score = 1; reason = "exact name"; }
-    else if ((m.aliases ?? []).some((a) => cleanName(a) === rc)) { score = 0.98; reason = "alias disetujui"; }
-    else {
-      let s = jaccard(raw, m.name);
-      // penalti bila ukuran/kemasan berbeda
-      if (rsize && sizeSet(m.name) && rsize !== sizeSet(m.name)) s *= 0.5;
-      score = +s.toFixed(3); reason = score >= AUTO_THRESHOLD ? "token similarity tinggi" : "token similarity";
-    }
-    if (score > 0) cands.push({ id: m.id, sku: m.sku, name: m.name, uom: m.uom, gramasi: m.gramasi, price_ref: m.price_ref, score, reason });
-  }
-  cands.sort((a, b) => b.score - a.score);
-  const top = cands[0] ?? null;
-  const auto = top && top.score >= AUTO_THRESHOLD ? top : null;
-  return { auto, candidates: cands.slice(0, 5), needsReview: !auto };
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "nextjs",
+  "regions": ["sin1"]
 }
