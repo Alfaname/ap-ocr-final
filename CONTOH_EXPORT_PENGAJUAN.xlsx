@@ -1,0 +1,190 @@
+import { NextRequest, NextResponse } from "next/server";
+import { randomUUID } from "crypto";
+import { supabaseAdmin } from "@/lib/supabase/server";
+import { assertRole } from "@/server/guards";
+import { rateLimit, clientKey } from "@/lib/rate-limit";
+
+const ALLOWED = ["image/jpeg", "image/png", "image/webp", "application/pdf"] as const;
+const MAX = Number(process.env.UPLOAD_MAX_MB ?? 30) * 1024 * 1024;
+const BUCKET = process.env.SUPABASE_STORAGE_BUCKET ?? "documents";
+
+type UploadPayload = {
+  action?: "prepare" | "complete";
+  batchId?: string;
+  name?: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  sha256?: string;
+  storagePath?: string;
+};
+
+function validateMetadata(body: UploadPayload) {
+  const batchId = String(body.batchId ?? "").trim();
+  const name = String(body.name ?? "").trim();
+  const mimeType = String(body.mimeType ?? "").trim();
+  const sizeBytes = Number(body.sizeBytes ?? 0);
+  const sha256 = String(body.sha256 ?? "").toLowerCase();
+
+  if (!batchId || !name || !mimeType || !Number.isFinite(sizeBytes) || !sha256) {
+    throw new Error("metadata file tidak lengkap");
+  }
+  if (!ALLOWED.includes(mimeType as (typeof ALLOWED)[number])) {
+    throw new Error("MIME tidak didukung");
+  }
+  if (sizeBytes <= 0 || sizeBytes > MAX) {
+    throw new Error(`Ukuran file harus 1 byte sampai ${Math.floor(MAX / 1024 / 1024)} MB`);
+  }
+  if (!/^[a-f0-9]{64}$/.test(sha256)) {
+    throw new Error("checksum SHA-256 tidak valid");
+  }
+
+  return { batchId, name, mimeType, sizeBytes, sha256 };
+}
+
+function safeFilename(name: string) {
+  const cleaned = name.replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/^_+|_+$/g, "");
+  return cleaned.slice(-180) || "document";
+}
+
+export async function POST(req: NextRequest) {
+  const rl = rateLimit(clientKey(req, "upload"), 120, 60_000);
+  if (!rl.ok) {
+    return NextResponse.json({ error: "rate limit terlampaui" }, { status: 429 });
+  }
+
+  let userId: string;
+  try {
+    ({ userId } = await assertRole(["UPLOADER"]));
+  } catch (error) {
+    return NextResponse.json(
+      { error: (error as Error).message === "unauthorized" ? "unauthorized" : "forbidden" },
+      { status: (error as Error).message === "unauthorized" ? 401 : 403 },
+    );
+  }
+
+  let body: UploadPayload;
+  try {
+    body = (await req.json()) as UploadPayload;
+  } catch {
+    return NextResponse.json({ error: "body JSON tidak valid" }, { status: 400 });
+  }
+
+  const admin = supabaseAdmin();
+
+  try {
+    const meta = validateMetadata(body);
+
+    const { data: batch, error: batchError } = await admin
+      .from("batches")
+      .select("id")
+      .eq("id", meta.batchId)
+      .is("deleted_at", null)
+      .maybeSingle();
+    if (batchError) throw batchError;
+    if (!batch) return NextResponse.json({ error: "batch tidak ditemukan" }, { status: 404 });
+
+    if (body.action === "prepare") {
+      const { data: duplicate, error: duplicateError } = await admin
+        .from("documents")
+        .select("id")
+        .eq("batch_id", meta.batchId)
+        .eq("sha256", meta.sha256)
+        .is("deleted_at", null)
+        .maybeSingle();
+      if (duplicateError) throw duplicateError;
+      if (duplicate) {
+        return NextResponse.json({
+          status: "DUPLICATE",
+          documentId: duplicate.id,
+          reason: "checksum sama",
+        });
+      }
+
+      const path = `${meta.batchId}/${meta.sha256.slice(0, 12)}_${randomUUID().slice(0, 8)}_${safeFilename(meta.name)}`;
+      const { data, error } = await admin.storage.from(BUCKET).createSignedUploadUrl(path);
+      if (error || !data?.token) throw error ?? new Error("gagal membuat signed upload URL");
+
+      return NextResponse.json({ status: "READY", path, token: data.token });
+    }
+
+    if (body.action === "complete") {
+      const storagePath = String(body.storagePath ?? "");
+      if (!storagePath.startsWith(`${meta.batchId}/`) || storagePath.includes("..")) {
+        return NextResponse.json({ error: "storage path tidak valid" }, { status: 400 });
+      }
+
+      const slash = storagePath.lastIndexOf("/");
+      const folder = storagePath.slice(0, slash);
+      const objectName = storagePath.slice(slash + 1);
+      const { data: objects, error: listError } = await admin.storage
+        .from(BUCKET)
+        .list(folder, { search: objectName, limit: 10 });
+      if (listError) throw listError;
+      if (!(objects ?? []).some((object) => object.name === objectName)) {
+        return NextResponse.json({ error: "file belum tersedia di storage" }, { status: 409 });
+      }
+
+      const { data: duplicate, error: duplicateError } = await admin
+        .from("documents")
+        .select("id")
+        .eq("batch_id", meta.batchId)
+        .eq("sha256", meta.sha256)
+        .is("deleted_at", null)
+        .maybeSingle();
+      if (duplicateError) throw duplicateError;
+      if (duplicate) {
+        await admin.storage.from(BUCKET).remove([storagePath]);
+        return NextResponse.json({
+          status: "DUPLICATE",
+          documentId: duplicate.id,
+          reason: "checksum sama",
+        });
+      }
+
+      const { data: lastDocument } = await admin
+        .from("documents")
+        .select("seq")
+        .eq("batch_id", meta.batchId)
+        .order("seq", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      const { data: document, error: insertError } = await admin
+        .from("documents")
+        .insert({
+          batch_id: meta.batchId,
+          original_filename: meta.name,
+          mime_type: meta.mimeType,
+          size_bytes: meta.sizeBytes,
+          sha256: meta.sha256,
+          storage_path: storagePath,
+          seq: Number(lastDocument?.seq ?? -1) + 1,
+          status: "PENDING",
+          uploaded_by: userId,
+        })
+        .select("id")
+        .single();
+
+      if (insertError || !document) {
+        await admin.storage.from(BUCKET).remove([storagePath]);
+        throw insertError ?? new Error("gagal mencatat dokumen");
+      }
+
+      await Promise.all([
+        admin.from("audit_logs").insert({
+          actor: userId,
+          action: "UPLOAD",
+          object_type: "document",
+          object_id: document.id,
+        }),
+        admin.from("batches").update({ status: "UPLOADING" }).eq("id", meta.batchId),
+      ]);
+
+      return NextResponse.json({ status: "UPLOADED", documentId: document.id });
+    }
+
+    return NextResponse.json({ error: "action tidak valid" }, { status: 400 });
+  } catch (error) {
+    return NextResponse.json({ error: (error as Error).message }, { status: 500 });
+  }
+}

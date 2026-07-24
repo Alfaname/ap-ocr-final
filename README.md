@@ -1,86 +1,74 @@
-# AP OCR — Pengajuan Account Payable
+import { z } from "zod";
+// Skema hasil OCR — structured output tervalidasi (brief §J). null bila tidak terbaca.
+const conf = z.number().min(0).max(1);
 
-Aplikasi Next.js untuk mengubah foto/PDF invoice, nota, dan struk menjadi tabel pengajuan Account Payable dengan autentikasi Supabase, OCR, review manusia, approval, audit log, ekspor Excel, dan integrasi Google Drive/Sheets.
+export const LineItem = z.object({
+  line_number: z.number().int().min(1),
+  raw_description: z.string(),
+  normalized_description: z.string().default(""),
+  sku: z.string().default(""),
+  product_master_id: z.string().uuid().nullable().default(null),
+  quantity_raw: z.string().default(""),
+  quantity: z.number().nullable(),
+  unit_raw: z.string().default(""),
+  unit_normalized: z.string().default(""),
+  unit_price_raw: z.string().default(""),
+  unit_price: z.number().nullable(),
+  discount: z.number().nullable().default(null),
+  tax: z.number().nullable().default(null),
+  line_total_raw: z.string().default(""),
+  line_total: z.number().nullable(),
+  source_page: z.number().int().min(1).default(1),
+  bounding_box: z.any().nullable().default(null),
+  confidence: z.object({
+    description: conf, quantity: conf, unit: conf, unit_price: conf, line_total: conf,
+  }),
+  warnings: z.array(z.string()).default([]),
+});
 
-## Fitur yang tersedia
+export const OcrDocument = z.object({
+  document_type: z.enum(["INVOICE","RECEIPT","NOTA_PASAR","PURCHASE_ORDER","DELIVERY_NOTE","TAX_INVOICE","EMAIL_ATTACHMENT","PAYMENT_SUPPORT","UNKNOWN"]),
+  language: z.string().default("id"),
+  currency: z.string().default("IDR"),
+  entity_detected: z.string().default(""),
+  outlet_detected: z.string().default(""),
+  supplier_raw: z.string().default(""),
+  supplier_normalized: z.string().default(""),
+  supplier_id: z.string().uuid().nullable().default(null),
+  invoice_number_raw: z.string().default(""),
+  invoice_number_normalized: z.string().default(""),
+  invoice_date_raw: z.string().default(""),
+  invoice_date: z.string().nullable(),      // ISO yyyy-mm-dd
+  due_date_raw: z.string().default(""),
+  due_date: z.string().nullable(),
+  purchase_order_number: z.string().default(""),
+  tax_invoice_number: z.string().default(""),
+  payment_terms: z.string().default(""),
+  subtotal: z.number().nullable(), discount: z.number().nullable(), tax: z.number().nullable(),
+  shipping: z.number().nullable(), other_charges: z.number().nullable(), rounding: z.number().nullable(),
+  grand_total: z.number().nullable(),
+  notes: z.string().default(""),
+  page_count: z.number().int().min(1).default(1),
+  overall_confidence: conf,
+  warnings: z.array(z.string()).default([]),
+});
 
-- Login Supabase dan proteksi route melalui middleware.
-- Dashboard, batch, dokumen, review dua panel, pengajuan, ringkasan, master supplier/produk, integrasi, audit log, dan settings.
-- Upload langsung dari browser ke bucket privat Supabase memakai signed upload URL.
-- Batas file **30 MB** untuk PDF, JPG/JPEG, PNG, dan WebP.
-- Deteksi file duplikat berdasarkan SHA-256.
-- Pipeline klasifikasi dan OCR dengan Anthropic dari server.
-- Validasi total, pencocokan supplier/produk, dan deteksi duplikat invoice.
-- Review dan approval berbasis role.
-- Ekspor Excel format pengajuan A–Q.
-- Integrasi OAuth Google Drive dan Google Sheets.
-- RLS, role guard, audit log, masking nomor rekening, dan rate limit dasar.
+export const OcrResult = z.object({
+  document: OcrDocument,
+  line_items: z.array(LineItem),
+  unclassified_text: z.array(z.string()).default([]),
+  validation_summary: z.object({
+    line_item_total: z.number().nullable(),
+    calculated_grand_total: z.number().nullable(),
+    difference: z.number().nullable(),
+    is_balanced: z.boolean().default(false),
+  }),
+});
+export type OcrResult = z.infer<typeof OcrResult>;
+export type LineItem = z.infer<typeof LineItem>;
 
-## Struktur penting
-
-```text
-app/                         Halaman dan API route Next.js
-src/components/              Komponen UI
-src/server/pipeline/         Pipeline pemrosesan dokumen
-src/services/                OCR, export, Drive, dan Sheets
-supabase/migrations/         Schema, RLS, function, dan action database
-docs/                        Audit, arsitektur, keamanan, deployment, testing
-tests/                       Unit test Vitest
-e2e/                         Smoke test Playwright
-```
-
-## Environment variables
-
-Salin `.env.example` menjadi `.env.local` untuk lokal atau masukkan variabel yang sama di Vercel:
-
-```env
-NEXT_PUBLIC_SUPABASE_URL=
-NEXT_PUBLIC_SUPABASE_ANON_KEY=
-SUPABASE_SERVICE_ROLE_KEY=
-SUPABASE_STORAGE_BUCKET=documents
-
-ANTHROPIC_API_KEY=
-ANTHROPIC_MODEL=
-
-GOOGLE_CLIENT_ID=
-GOOGLE_CLIENT_SECRET=
-GOOGLE_REDIRECT_URI=
-
-APP_BASE_URL=http://localhost:3000
-UPLOAD_MAX_MB=30
-SIGNED_URL_TTL_SECONDS=300
-```
-
-Jangan pernah mengisi atau mengunggah `.env.local` ke GitHub.
-
-## Menjalankan lokal
-
-```bash
-npm install
-npm run dev
-```
-
-Buka `http://localhost:3000`.
-
-## Deploy ke Vercel
-
-1. Import repository GitHub `Alfaname/ap-ocr-final` ke Vercel.
-2. Masukkan semua environment variables dari `.env.example`.
-3. Set `APP_BASE_URL` ke domain deployment.
-4. Deploy.
-5. Tambahkan domain callback Google OAuth sesuai `GOOGLE_REDIRECT_URI`.
-6. Di Supabase Auth, tambahkan domain Vercel ke Site URL/Redirect URLs.
-
-## Supabase yang digunakan
-
-- Project: `ap-ocr`
-- Bucket: `documents`
-- Bucket bersifat private.
-- Maksimum upload: 30 MB.
-- MIME: `application/pdf`, `image/jpeg`, `image/png`, `image/webp`.
-
-Database project sudah memiliki schema OCR, invoice, submission, master, role, review, approval, export, dan audit log. Jangan menjalankan migration lama secara membabi buta pada production tanpa membandingkan schema terlebih dahulu.
-
-## Validasi paket
-
-Paket distribusi dibuat tanpa `node_modules`, `.git`, `.env.local`, atau secret. Seluruh file `.ts` dan `.tsx` telah diperiksa sintaks TypeScript sebelum paket dibuat.
+export const DocClassification = z.object({
+  document_type: OcrDocument.shape.document_type,
+  confidence: conf,
+  reason: z.string(),
+});

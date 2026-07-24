@@ -1,11 +1,59 @@
-{
-  "compilerOptions": {
-    "target": "ES2022", "lib": ["dom","dom.iterable","ES2022"], "module": "esnext",
-    "moduleResolution": "bundler", "jsx": "preserve", "strict": true, "noEmit": true,
-    "esModuleInterop": true, "skipLibCheck": true, "resolveJsonModule": true, "isolatedModules": true,
-    "incremental": true, "baseUrl": ".", "paths": { "@/*": ["./src/*"] },
-    "plugins": [{ "name": "next" }]
-  },
-  "include": ["next-env.d.ts","**/*.ts","**/*.tsx",".next/types/**/*.ts"],
-  "exclude": ["node_modules"]
+// Normalisasi angka & tanggal Indonesia (locale id-ID). Aturan dari DATA_MAPPING.md §E.
+// 1.500 = 1500 (titik ribuan) | 1,50 = 1.5 (koma desimal) | 1.500,50 = 1500.5
+
+/** Parse angka Indonesia menjadi number. Kembalikan null bila tidak valid (jangan menebak). */
+export function parseIdNumber(input: string | number | null | undefined): number | null {
+  if (input === null || input === undefined) return null;
+  if (typeof input === "number") return Number.isFinite(input) ? input : null;
+  let s = String(input).trim();
+  if (s === "") return null;
+  s = s.replace(/rp/gi, "").replace(/\s/g, "");
+  const neg = /^-/.test(s) || /^\(.*\)$/.test(s);
+  s = s.replace(/[()]/g, "").replace(/^-/, "");
+  if (!/[0-9]/.test(s)) return null;
+  const hasDot = s.includes("."), hasComma = s.includes(",");
+  if (hasDot && hasComma) {
+    // pemisah terakhir = desimal
+    if (s.lastIndexOf(",") > s.lastIndexOf(".")) s = s.replace(/\./g, "").replace(",", ".");
+    else s = s.replace(/,/g, "");
+  } else if (hasComma) {
+    // koma = desimal (id-ID)
+    s = s.replace(/\./g, "").replace(",", ".");
+  } else if (hasDot) {
+    const parts = s.split(".");
+    // titik ribuan jika grup 3 digit & >1 grup, atau bagian akhir 3 digit
+    const thousand = parts.length > 1 && parts.slice(1).every((p) => p.length === 3);
+    s = thousand ? s.replace(/\./g, "") : s;
+  }
+  const n = Number(s);
+  if (!Number.isFinite(n)) return null;
+  return neg ? -n : n;
+}
+
+const MONTHS: Record<string, number> = {
+  jan:1,januari:1,feb:2,februari:2,mar:3,maret:3,apr:4,april:4,mei:5,jun:6,juni:6,
+  jul:7,juli:7,agu:8,agustus:8,agt:8,sep:9,september:9,okt:10,oktober:10,nov:11,november:11,des:12,desember:12,
+};
+/** Parse tanggal Indonesia → ISO 'yyyy-mm-dd' atau null. Tidak menebak tahun. */
+export function parseIdDate(input: string | null | undefined): string | null {
+  if (!input) return null;
+  const s = String(input).trim().toLowerCase();
+  if (s === "") return null;
+  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/); // ISO
+  if (m) return iso(+m[1], +m[2], +m[3]);
+  m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/); // dd/mm/yyyy
+  if (m) { let y=+m[3]; if(y<100)y+=2000; return iso(y, +m[2], +m[1]); }
+  m = s.match(/^(\d{1,2})\s+([a-z]+)\s+(\d{2,4})$/); // 2 juli 2026
+  if (m && MONTHS[m[2]]) { let y=+m[3]; if(y<100)y+=2000; return iso(y, MONTHS[m[2]], +m[1]); }
+  return null;
+}
+function iso(y: number, mo: number, d: number): string | null {
+  if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+  return `${y.toString().padStart(4,"0")}-${mo.toString().padStart(2,"0")}-${d.toString().padStart(2,"0")}`;
+}
+
+/** Format tampilan tabel: '#,##0' locale id (tanpa Rp). */
+export function formatIdNumber(n: number | null): string {
+  if (n === null || !Number.isFinite(n)) return "";
+  return new Intl.NumberFormat("id-ID", { maximumFractionDigits: 0 }).format(n);
 }

@@ -1,41 +1,42 @@
-{
-  "name": "ap-ocr",
-  "version": "0.1.0",
-  "private": true,
-  "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "next lint",
-    "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "e2e": "playwright test",
-    "import:master": "tsx scripts/import-master.ts"
-  },
-  "dependencies": {
-    "@anthropic-ai/sdk": "^0.32.1",
-    "@supabase/ssr": "^0.5.2",
-    "@supabase/supabase-js": "^2.45.4",
-    "@tanstack/react-table": "^8.20.5",
-    "exceljs": "^4.4.0",
-    "googleapis": "^144.0.0",
-    "next": "^15.0.0",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "react-hook-form": "^7.53.0",
-    "sharp": "^0.33.5",
-    "zod": "^3.23.8"
-  },
-  "devDependencies": {
-    "@playwright/test": "^1.47.2",
-    "@types/node": "^22.7.4",
-    "@types/react": "^18.3.11",
-    "autoprefixer": "^10.4.20",
-    "postcss": "^8.4.47",
-    "tailwindcss": "^3.4.13",
-    "tsx": "^4.19.1",
-    "typescript": "^5.6.2",
-    "vitest": "^2.1.2"
-  }
+/* Impor Master Supplier & SKU dari XLSX (preview + validasi sebelum commit).
+   Jalankan: tsx scripts/import-master.ts <supplier.xlsx> <sku.xlsx>
+   Mapping SKU (AUDIT §4.1): G=SKU,H=NAME,I=UOM,J=UOM MIN,K=GRAMASI. Supplier: DATA SUPPLIER 2. */
+import ExcelJS from "exceljs";
+import { createClient } from "@supabase/supabase-js";
+const sb = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
+
+async function importSku(path: string) {
+  const wb = new ExcelJS.Workbook(); await wb.xlsx.readFile(path);
+  const ws = wb.getWorksheet("SKU PRODUCT") ?? wb.worksheets[0];
+  const rows: any[] = [];
+  ws.eachRow((r, i) => {
+    if (i < 4) return; // 3 baris header
+    const sku = String(r.getCell(7).value ?? "").trim(); const name = String(r.getCell(8).value ?? "").trim();
+    if (!sku || !name) return;
+    rows.push({ sku, name, department_code: String(r.getCell(1).value ?? ""), department_name: String(r.getCell(2).value ?? ""),
+      category_code: String(r.getCell(3).value ?? ""), category_name: String(r.getCell(4).value ?? ""),
+      subcategory_code: String(r.getCell(5).value ?? ""), subcategory_name: String(r.getCell(6).value ?? ""),
+      uom: String(r.getCell(9).value ?? ""), uom_minimum: String(r.getCell(10).value ?? ""), gramasi: Number(r.getCell(11).value ?? 0) || null });
+  });
+  console.log(`SKU: ${rows.length} baris valid. Contoh:`, rows.slice(0, 3));
+  for (let i = 0; i < rows.length; i += 500) await sb.from("products").upsert(rows.slice(i, i + 500), { onConflict: "sku" });
+  console.log("SKU import selesai.");
 }
+async function importSupplier(path: string) {
+  const wb = new ExcelJS.Workbook(); await wb.xlsx.readFile(path);
+  const ws = wb.getWorksheet("DATA SUPPLIER 2") ?? wb.worksheets[0];
+  const rows: any[] = [];
+  ws.eachRow((r, i) => {
+    if (i < 2) return;
+    const nama = String(r.getCell(2).value ?? "").trim(); if (!nama) return;
+    rows.push({ no_urut: Number(r.getCell(1).value) || null, nama_supplier: nama,
+      term_of_payment: parseInt(String(r.getCell(3).value ?? "").replace(/\D/g, "")) || null,
+      payment_method: String(r.getCell(10).value ?? ""), nama_bank: String(r.getCell(11).value ?? ""),
+      pemilik_rekening: String(r.getCell(12).value ?? ""), no_rekening: String(r.getCell(13).value ?? ""), kriteria: String(r.getCell(14).value ?? "") });
+  });
+  console.log(`Supplier: ${rows.length} baris valid.`);
+  for (let i = 0; i < rows.length; i += 500) await sb.from("suppliers").upsert(rows.slice(i, i + 500));
+  console.log("Supplier import selesai.");
+}
+const [, , supplierFile, skuFile] = process.argv;
+(async () => { if (supplierFile) await importSupplier(supplierFile); if (skuFile) await importSku(skuFile); })();
