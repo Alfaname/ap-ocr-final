@@ -1,0 +1,1 @@
+{ "framework": "nextjs", "regions": ["sin1"], "functions": { "app/api/documents/**/route.ts": { "maxDuration": 60 }, "app/api/export/route.ts": { "maxDuration": 60 } } }
